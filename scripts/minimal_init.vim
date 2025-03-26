@@ -1,6 +1,5 @@
 set rtp+=.
-set rtp+=../plenary.nvim/
-set rtp+=../popup.nvim/
-set rtp+=../tree-sitter-lua/
+set rtp+=.deps/plenary.nvim/
+set rtp+=.deps/telescope.nvim/
 
 runtime! plugin/plenary.vim

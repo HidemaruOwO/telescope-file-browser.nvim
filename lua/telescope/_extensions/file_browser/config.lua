@@ -1,4 +1,5 @@
 local fb_actions = require "telescope._extensions.file_browser.actions"
+local fb_utils = require "telescope._extensions.file_browser.utils"
 local Path = require "plenary.path"
 
 local action_state = require "telescope.actions.state"
@@ -44,12 +45,24 @@ _TelescopeFileBrowserConfig = {
       [","] = fb_actions.toggle_hidden,
     },
   },
-  attach_mappings = function()
-    action_set.select:replace_if(function()
-      -- test whether selected entry is directory
+  attach_mappings = function(_, _)
+    local entry_is_dir = function()
       local entry = action_state.get_selected_entry()
-      return entry and entry.Path:is_dir()
-    end, fb_actions.open_dir)
+      return entry and fb_utils.is_dir(entry.Path)
+    end
+
+    local create_from_prompt = function(prompt_bufnr)
+      local picker = action_state.get_current_picker(prompt_bufnr)
+      local finder = picker.finder
+      local prompt = picker:_get_prompt()
+      local entry = action_state.get_selected_entry()
+      return entry == nil and #prompt > 0 and finder.create_from_prompt
+    end
+
+    action_set.select:replace_map {
+      [entry_is_dir] = fb_actions.open_dir,
+      [create_from_prompt] = fb_actions.create_from_prompt,
+    }
 
     return true
   end,
@@ -109,6 +122,15 @@ config.setup = function(opts)
   -- TODO maybe merge other keys as well from telescope.config
   config.values.mappings =
     vim.tbl_deep_extend("force", config.values.mappings, require("telescope.config").values.mappings)
+
+  if opts.attach_mappings then
+    local opts_attach = opts.attach_mappings
+    local default_attach = config.values.attach_mappings
+    opts.attach_mappings = function(prompt_bufnr, map)
+      default_attach(prompt_bufnr, map)
+      return opts_attach(prompt_bufnr, map)
+    end
+  end
   config.values = vim.tbl_deep_extend("force", config.values, opts)
 
   if config.values.hijack_netrw then

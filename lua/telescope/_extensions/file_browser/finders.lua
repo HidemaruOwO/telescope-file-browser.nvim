@@ -1,9 +1,5 @@
----@tag telescope-file-browser.finders
----@config { ["module"] = "telescope-file-browser.finders" }
-
----@brief [[
+---@brief
 --- The file browser finders power the picker with both a file and folder browser.
----@brief ]]
 
 local fb_utils = require "telescope._extensions.file_browser.utils"
 local fb_make_entry = require "telescope._extensions.file_browser.make_entry"
@@ -30,9 +26,16 @@ local function hidden_opts(opts)
   end
 end
 
-local has_fd = vim.fn.executable "fd" == 1
+local has_fd_cache = nil
+local has_fd = function()
+  if has_fd_cache == nil then
+    has_fd_cache = vim.fn.executable "fd" == 1
+  end
+  return has_fd_cache
+end
+
 local use_fd = function(opts)
-  return opts.use_fd and has_fd
+  return opts.use_fd and has_fd()
 end
 
 local function fd_file_args(opts)
@@ -62,6 +65,9 @@ local function fd_file_args(opts)
   if not opts.respect_gitignore then
     table.insert(args, "--no-ignore-vcs")
   end
+  if opts.no_ignore then
+    table.insert(args, "--no-ignore")
+  end
   if opts.follow_symlinks then
     table.insert(args, "--follow")
   end
@@ -76,12 +82,8 @@ local function git_args()
 end
 
 --- Returns a finder that is populated with files and folders in `path`.
---- - Notes:
----  - Uses `fd` if available for more async-ish browsing and speed-ups
----@param opts table: options to pass to the finder
----@field path string: root dir to browse from
----@field depth number: file tree depth to display, `false` for unlimited (default: 1)
----@field hidden table|boolean: determines whether to show hidden files or not (default: `{ file_browser = false, folder_browser = false }`)
+---@note Uses `fd` if available for more async-ish browsing and speed-ups
+---@param opts telescope-file-browser.FinderOpts?: options to pass to the finder
 fb_finders.browse_files = function(opts)
   opts = opts or {}
   -- returns copy with properly set cwd for entry maker
@@ -113,8 +115,11 @@ fb_finders.browse_files = function(opts)
 
   local git_file_status = {}
   if opts.git_status then
-    local git_status = Job:new({ cwd = opts.path, command = "git", args = git_args() }):sync()
-    git_file_status = fb_git.parse_status_output(git_status, opts.git_root)
+    local git_root = fb_git.find_root(opts.path)
+    if git_root ~= nil then
+      local git_status = Job:new({ cwd = opts.path, command = "git", args = git_args() }):sync()
+      git_file_status = fb_git.parse_status_output(git_status, git_root)
+    end
   end
   if opts.path ~= os_sep and not opts.hide_parent_dir then
     table.insert(data, 1, parent_path)
@@ -130,13 +135,10 @@ fb_finders.browse_files = function(opts)
 end
 
 --- Returns a finder that is populated with (sub-)folders of `cwd`.
---- - Notes:
----  - Uses `fd` if available for more async-ish browsing and speed-ups
----@param opts table: options to pass to the finder
----@field cwd string: root dir to browse from
----@field depth number: file tree depth to display (default: 1)
----@field hidden table|boolean: determines whether to show hidden files or not (default: `{ file_browser = false, folder_browser = false }`)
+---@note Uses `fd` if available for more async-ish browsing and speed-ups
+---@param opts telescope-file-browser.FinderOpts?: options to pass to the finder
 fb_finders.browse_folders = function(opts)
+  opts = opts or {}
   -- returns copy with properly set cwd for entry maker
   local cwd = opts.cwd_to_path and opts.path or opts.cwd
   local entry_maker = opts.entry_maker { cwd = cwd }
@@ -160,27 +162,18 @@ fb_finders.browse_folders = function(opts)
   end
 end
 
+---@class telescope-file-browser.FinderOpts : telescope-file-browser.PickerOpts
+---@field entry_maker fun(opts: table): function entry maker for the finder (advanced)
+---@field _entry_cache table<string, table>
+
 --- Returns a finder that combines |fb_finders.browse_files| and |fb_finders.browse_folders| into a unified finder.
----@param opts table: options to pass to the picker
----@field path string: root dir to file_browse from (default: vim.loop.cwd())
----@field cwd string: root dir (default: vim.loop.cwd())
----@field cwd_to_path boolean: folder browser follows `path` of file browser
----@field files boolean: start in file (true) or folder (false) browser (default: true)
----@field grouped boolean: group initial sorting by directories and then files (default: false)
----@field depth number: file tree depth to display (default: 1)
----@field hidden table|boolean: determines whether to show hidden files or not (default: `{ file_browser = false, folder_browser = false }`)
----@field respect_gitignore boolean: induces slow-down w/ plenary finder (default: false, true if `fd` available)
----@field follow_symlinks boolean: traverse symbolic links, i.e. files and folders (default: false, only works with `fd`)
----@field hide_parent_dir boolean: hide `../` in the file browser (default: false)
----@field dir_icon string: change the icon for a directory (default: )
----@field dir_icon_hl string: change the highlight group of dir icon (default: "Default")
----@field use_fd boolean: use `fd` if available over `plenary.scandir` (default: true)
----@field git_status boolean: show the git status of files (default: true)
+---@param opts telescope-file-browser.FinderOpts?: options to pass to the picker
+---@return table # telescope finder
 fb_finders.finder = function(opts)
   opts = opts or {}
   -- cache entries such that multi selections are maintained across {file, folder}_browsers
   -- otherwise varying metatables misalign selections
-  opts.entry_cache = {}
+  opts._entry_cache = {}
 
   local hidden_default = { file_browser = false, folder_browser = false }
   local hidden = vim.F.if_nil(opts.hidden, hidden_default)
@@ -188,17 +181,18 @@ fb_finders.finder = function(opts)
     hidden = vim.tbl_extend("keep", hidden, hidden_default)
   end
 
-  local git_root = Job:new({ command = "git", args = { "rev-parse", "--show-toplevel" } }):sync()[1]
+  local cwd = opts.cwd_to_path and opts.path or opts.cwd
 
   return setmetatable({
     cwd_to_path = opts.cwd_to_path,
-    cwd = opts.cwd_to_path and opts.path or opts.cwd, -- nvim cwd
+    cwd = cwd,
     path = vim.F.if_nil(opts.path, opts.cwd), -- current path for file browser
     add_dirs = vim.F.if_nil(opts.add_dirs, true),
     hidden = hidden,
     depth = vim.F.if_nil(opts.depth, 1), -- depth for file browser
     auto_depth = vim.F.if_nil(opts.auto_depth, false), -- depth for file browser
-    respect_gitignore = vim.F.if_nil(opts.respect_gitignore, has_fd),
+    respect_gitignore = vim.F.if_nil(opts.respect_gitignore, has_fd()),
+    no_ignore = vim.F.if_nil(opts.no_ignore, false),
     follow_symlinks = vim.F.if_nil(opts.follow_symlinks, false),
     files = vim.F.if_nil(opts.files, true), -- file or folders mode
     grouped = vim.F.if_nil(opts.grouped, false),
@@ -206,8 +200,9 @@ fb_finders.finder = function(opts)
     select_buffer = vim.F.if_nil(opts.select_buffer, false),
     hide_parent_dir = vim.F.if_nil(opts.hide_parent_dir, false),
     collapse_dirs = vim.F.if_nil(opts.collapse_dirs, false),
-    git_status = vim.F.if_nil(opts.git_status, git_root ~= nil),
-    git_root = git_root,
+    git_status = vim.F.if_nil(opts.git_status, fb_git.find_root(cwd) ~= nil),
+    create_from_prompt = vim.F.if_nil(opts.create_from_prompt, true),
+
     -- ensure we forward make_entry opts adequately
     entry_maker = vim.F.if_nil(opts.entry_maker, function(local_opts)
       return fb_make_entry(vim.tbl_extend("force", opts, local_opts))
@@ -217,8 +212,8 @@ fb_finders.finder = function(opts)
     close = function(self)
       self._finder = nil
     end,
-    prompt_title = opts.custom_prompt_title,
-    results_title = opts.custom_results_title,
+    prompt_title = opts._custom_prompt_title,
+    results_title = opts._custom_results_title,
     prompt_path = opts.prompt_path,
     use_fd = vim.F.if_nil(opts.use_fd, true),
   }, {
